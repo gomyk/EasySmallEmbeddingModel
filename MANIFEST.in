@@ -1,0 +1,2 @@
+recursive-include smallmodel/web/static *
+recursive-include smallmodel/web/templates *
