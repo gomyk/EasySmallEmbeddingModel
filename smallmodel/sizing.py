@@ -99,6 +99,46 @@ def estimate_for_teacher(
     )
 
 
+def calculate_target_vocab(
+    hidden_dim: int,
+    num_layers: int,
+    intermediate_size: int | None = None,
+    target_mb: float = 50.0,
+) -> int:
+    """Calculate vocab size to fit target model size.
+
+    For 768d models, layer params alone may exceed 50MB.
+    In that case returns min_vocab (5000) and actual size may exceed target.
+    """
+    if intermediate_size is None:
+        intermediate_size = hidden_dim * 4
+
+    layer_params = (
+        3 * hidden_dim * hidden_dim
+        + hidden_dim * hidden_dim
+        + 2 * hidden_dim * intermediate_size
+        + 4 * hidden_dim
+    )
+
+    overhead_params = (
+        hidden_dim
+        + 514 * hidden_dim
+        + 2 * hidden_dim
+    )
+
+    total_non_vocab = overhead_params + num_layers * layer_params
+    target_bytes = target_mb * (1024 ** 2)
+    available_for_vocab = (target_bytes / 4) - total_non_vocab
+
+    min_vocab = 5000
+    max_vocab = int(available_for_vocab / hidden_dim)
+
+    if max_vocab < min_vocab:
+        return min_vocab
+
+    return max_vocab
+
+
 def find_optimal_config(
     teacher_key: str,
     max_params: int = 20_000_000,

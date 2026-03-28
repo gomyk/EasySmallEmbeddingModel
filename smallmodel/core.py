@@ -188,6 +188,7 @@ class SmallModel:
         min_layers: int = 4,
         vocab_percentile: float = 0.95,
         min_vocab: int | None = None,
+        use_pca: bool = False,
     ) -> str:
         """Create an optimally compressed model within size constraints.
 
@@ -200,7 +201,7 @@ class SmallModel:
         from smallmodel.arch import (
             create_pruned_student, collect_corpus_tokens,
             prune_tokenizer_and_embeddings, save_as_sentence_transformer,
-            reduce_hidden_dim,
+            reduce_hidden_dim, reduce_hidden_dim_pca,
         )
         from transformers import AutoTokenizer
         from sentence_transformers import SentenceTransformer
@@ -258,7 +259,8 @@ class SmallModel:
         students_dir = os.path.join(self.output_dir, "students", self.teacher_key)
         os.makedirs(students_dir, exist_ok=True)
 
-        def _build_model(layer_indices, target_h, target_inter, k_ids, save_name, needs_reduction):
+        def _build_model(layer_indices, target_h, target_inter, k_ids, save_name,
+                         needs_reduction, apply_pca=False):
             save_path = os.path.join(students_dir, save_name)
             os.makedirs(save_path, exist_ok=True)
 
@@ -268,8 +270,15 @@ class SmallModel:
                 trust_remote_code=t["trust_remote_code"],
             )
             if needs_reduction:
-                student_hf = reduce_hidden_dim(student_hf, target_h, target_inter,
-                                               trust_remote_code=t["trust_remote_code"])
+                if apply_pca and corpus_texts:
+                    student_hf = reduce_hidden_dim_pca(
+                        student_hf, tok, target_h, corpus_texts,
+                        new_intermediate_size=target_inter,
+                        trust_remote_code=t["trust_remote_code"],
+                    )
+                else:
+                    student_hf = reduce_hidden_dim(student_hf, target_h, target_inter,
+                                                   trust_remote_code=t["trust_remote_code"])
 
             hf_tmp = os.path.join(save_path, "_hf_pruned")
             student_hf = prune_tokenizer_and_embeddings(student_hf, tok, k_ids, hf_tmp)
@@ -300,10 +309,12 @@ class SmallModel:
             )
 
         # Build final
-        print(f"\n  Building final compressed model...")
+        pca_label = " (PCA)" if use_pca and self._needs_hidden_reduction else ""
+        print(f"\n  Building final compressed model{pca_label}...")
         self._student_path = _build_model(
             self.layer_indices, self.hidden_dim, self.intermediate_size,
             keep_ids, f"{self.teacher_key}_compressed", self._needs_hidden_reduction,
+            apply_pca=use_pca,
         )
 
         print(f"\nCompression complete: {self._student_path}")

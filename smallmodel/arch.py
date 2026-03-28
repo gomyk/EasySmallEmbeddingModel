@@ -748,6 +748,272 @@ def _copy_custom_code_files(model, target_dir):
                         shutil.copy2(py_file, dest)
 
 
+def reduce_hidden_dim_pca(model, tokenizer, new_hidden_dim: int, corpus_texts: list[str],
+                          new_intermediate_size: int | None = None,
+                          trust_remote_code: bool = False,
+                          n_samples: int = 2000, batch_size: int = 64,
+                          max_length: int = 128):
+    """PCA-based hidden dimension reduction.
+
+    Collects hidden states from a corpus, computes PCA optimal projection,
+    and transforms weights into PCA space for dimensionally reduced model.
+
+    Advantages over simple slicing:
+      - Preserves most informative directions
+      - Reports explained variance ratio for quality assessment
+
+    Returns the reduced model.
+    """
+    old_hidden = model.config.hidden_size
+    if new_hidden_dim >= old_hidden:
+        return model
+
+    old_inter = getattr(model.config, 'intermediate_size', old_hidden * 4)
+    if new_intermediate_size is None:
+        ratio = new_hidden_dim / old_hidden
+        new_intermediate_size = max(64, (int(old_inter * ratio) // 64) * 64)
+
+    device = next(model.parameters()).device
+
+    # 1. Collect hidden states
+    print(f"  PCA: collecting hidden states ({min(len(corpus_texts), n_samples)} samples)...")
+    model.eval()
+    all_hidden = []
+    with torch.no_grad():
+        for i in range(0, min(len(corpus_texts), n_samples), batch_size):
+            batch = corpus_texts[i:i + batch_size]
+            encoded = tokenizer(
+                batch, padding=True, truncation=True,
+                max_length=max_length, return_tensors="pt",
+            ).to(device)
+            output = model(**encoded)
+            h = output.last_hidden_state
+            mask = encoded["attention_mask"].unsqueeze(-1).float()
+            pooled = (h * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+            all_hidden.append(pooled.cpu().float())
+
+    H = torch.cat(all_hidden, dim=0)
+
+    # 2. Compute PCA
+    H_centered = H - H.mean(0, keepdim=True)
+    _, S, Vt = torch.linalg.svd(H_centered, full_matrices=False)
+    V_proj = Vt[:new_hidden_dim].T  # [D, K]
+
+    explained_var = (S[:new_hidden_dim] ** 2).sum() / (S ** 2).sum()
+    print(f"  PCA: {old_hidden}d -> {new_hidden_dim}d "
+          f"(explained variance: {explained_var:.1%}, samples: {H.shape[0]})")
+
+    # 3. Create new config + model
+    new_config = copy.deepcopy(model.config)
+    new_config.hidden_size = new_hidden_dim
+    new_config.intermediate_size = new_intermediate_size
+
+    ratio = new_hidden_dim / old_hidden
+    old_n_kv = getattr(new_config, 'num_key_value_heads', None)
+
+    if hasattr(new_config, 'num_attention_heads'):
+        n_heads = getattr(new_config, 'num_attention_heads')
+        if n_heads is not None:
+            n_heads = max(1, int(n_heads * ratio))
+            while new_hidden_dim % n_heads != 0 and n_heads > 1:
+                n_heads -= 1
+            new_config.num_attention_heads = n_heads
+
+    if old_n_kv is not None and hasattr(new_config, 'num_key_value_heads'):
+        n_heads = getattr(new_config, 'num_attention_heads', n_heads)
+        n_kv = max(1, int(old_n_kv * ratio))
+        while n_kv > 1 and (n_heads % n_kv != 0 or new_hidden_dim % n_kv != 0):
+            n_kv -= 1
+        new_config.num_key_value_heads = n_kv
+
+    if hasattr(new_config, 'head_dim') and new_config.head_dim is not None:
+        new_heads = getattr(new_config, 'num_attention_heads', 1)
+        new_config.head_dim = new_hidden_dim // new_heads
+
+    new_model = AutoModel.from_config(new_config, trust_remote_code=trust_remote_code)
+
+    # 4. Transform weights via PCA projection
+    V = V_proj.to(device)
+    old_sd = model.state_dict()
+    new_sd = new_model.state_dict()
+
+    copied, projected, skipped = 0, 0, 0
+    for key in new_sd:
+        if key not in old_sd:
+            skipped += 1
+            continue
+
+        old_t = old_sd[key]
+        new_t = new_sd[key]
+
+        if old_t.shape == new_t.shape:
+            new_sd[key] = old_t.clone()
+            copied += 1
+            continue
+
+        # 1D: bias, RMSNorm/LayerNorm weight
+        if old_t.dim() == 1:
+            if old_t.shape[0] == old_hidden and new_t.shape[0] == new_hidden_dim:
+                if "norm" in key.lower() or "ln" in key.lower():
+                    new_sd[key] = torch.ones(new_hidden_dim, dtype=old_t.dtype,
+                                             device=old_t.device)
+                else:
+                    new_sd[key] = (V.T.cpu().float() @ old_t.float()).to(old_t.dtype)
+                projected += 1
+            elif old_t.shape[0] == old_inter and new_t.shape[0] == new_intermediate_size:
+                new_sd[key] = old_t[:new_intermediate_size].clone()
+                copied += 1
+            else:
+                new_sd[key] = old_t[:new_t.shape[0]].clone()
+                copied += 1
+            continue
+
+        # 2D: linear layers, embeddings
+        if old_t.dim() == 2:
+            out_dim, in_dim = old_t.shape
+            new_out, new_in = new_t.shape
+            t = old_t.float()
+
+            if in_dim == old_hidden and new_in == new_hidden_dim:
+                t = t @ V.cpu().float()
+            elif in_dim != new_in:
+                t = t[:, :new_in]
+
+            if out_dim == old_hidden and new_out == new_hidden_dim:
+                t = V.T.cpu().float() @ t
+            elif out_dim != new_out:
+                t = t[:new_out]
+
+            new_sd[key] = t.to(old_t.dtype)
+            projected += 1
+            continue
+
+        # Fallback: slicing
+        slices = tuple(
+            slice(0, min(s_new, s_old))
+            for s_new, s_old in zip(new_t.shape, old_t.shape)
+        )
+        sliced = old_t[slices]
+        if sliced.shape == new_t.shape:
+            new_sd[key] = sliced.clone()
+        copied += 1
+
+    # Shape mismatch fallback
+    for key in new_sd:
+        if key not in old_sd:
+            continue
+        new_t = new_sd[key]
+        if new_t.shape != new_model.state_dict()[key].shape:
+            target_shape = new_model.state_dict()[key].shape
+            slices = tuple(
+                slice(0, min(s_src, s_tgt))
+                for s_src, s_tgt in zip(new_t.shape, target_shape)
+            )
+            fixed = torch.zeros(target_shape, dtype=new_t.dtype, device=new_t.device)
+            src_slices = tuple(slice(0, min(s_src, s_tgt))
+                               for s_src, s_tgt in zip(new_t.shape, target_shape))
+            fixed[src_slices] = new_t[slices]
+            new_sd[key] = fixed
+
+    new_model.load_state_dict(new_sd)
+    print(f"  PCA dim reduction: {old_hidden} -> {new_hidden_dim} "
+          f"(intermediate: {old_inter} -> {new_intermediate_size}, "
+          f"projected: {projected}, copied: {copied}, new: {skipped})")
+
+    for attr in ["pad_token_id", "bos_token_id", "eos_token_id",
+                 "cls_token_id", "sep_token_id", "unk_token_id", "mask_token_id"]:
+        old_val = getattr(model.config, attr, None)
+        if old_val is not None:
+            setattr(new_model.config, attr, old_val)
+
+    return new_model
+
+
+def generate_architecture_diagram(teacher_config: dict, layer_indices: list[int],
+                                  vocab_size: int,
+                                  pruned_vocab_size: int | None = None) -> str:
+    """Generate ASCII architecture diagram for model cards."""
+    from smallmodel.sizing import estimate_size
+
+    t = teacher_config
+    n_layers = t["num_layers"]
+    n_kept = len(layer_indices)
+    hidden = t["hidden_dim"]
+    orig_vocab = t["vocab_size"]
+    p_vocab = pruned_vocab_size or orig_vocab
+
+    lines = []
+    lines.append("```")
+    lines.append(f"{'='*62}")
+    lines.append(f"  TEACHER: {t['short_name']}  ->  STUDENT: {n_kept}L / {p_vocab:,} vocab")
+    lines.append(f"{'='*62}")
+    lines.append("")
+
+    lines.append(f"  {'TEACHER':^27}    {'STUDENT':^27}")
+    lines.append(f"  {'─'*27}    {'─'*27}")
+    lines.append("")
+
+    lines.append(f"  ┌─────────────────────────┐    ┌─────────────────────────┐")
+    lines.append(f"  │   Input Tokens          │    │   Input Tokens          │")
+    lines.append(f"  └────────────┬────────────┘    └────────────┬────────────┘")
+    lines.append(f"               │                              │")
+
+    lines.append(f"  ┌────────────┴────────────┐    ┌────────────┴────────────┐")
+    lines.append(f"  │  Embeddings             │    │  Embeddings (pruned)    │")
+    lines.append(f"  │  vocab: {orig_vocab:>7,}         │    │  vocab: {p_vocab:>7,}         │")
+    lines.append(f"  │  dim: {hidden:>4}              │    │  dim: {hidden:>4}              │")
+    lines.append(f"  └────────────┬────────────┘    └────────────┬────────────┘")
+    lines.append(f"               │                              │")
+
+    kept_set = set(layer_indices)
+    for i in range(n_layers):
+        is_kept = i in kept_set
+        new_idx = layer_indices.index(i) if is_kept else None
+
+        teacher_layer = f"  │  Layer {i:>2}               │"
+        if is_kept:
+            student_layer = f"  │  Layer {new_idx:>2} <- L{i:<2}        │"
+            arrow = " -->"
+        else:
+            student_layer = f"  │{'':25}│"
+            arrow = "  X "
+
+        if i == 0:
+            lines.append(f"  ┌─────────────────────────┐    ┌─────────────────────────┐")
+        lines.append(f"{teacher_layer}{arrow}{student_layer}")
+
+        if i < n_layers - 1:
+            if i + 1 in kept_set or i in kept_set:
+                lines.append(f"  ├─────────────────────────┤    ├─────────────────────────┤")
+            else:
+                lines.append(f"  ├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┤    │{'':25}│")
+        else:
+            lines.append(f"  └────────────┬────────────┘    └────────────┬────────────┘")
+
+    lines.append(f"               │                              │")
+    lines.append(f"  ┌────────────┴────────────┐    ┌────────────┴────────────┐")
+    lines.append(f"  │  Mean Pooling           │    │  Mean Pooling           │")
+    lines.append(f"  │  -> {hidden}d embedding       │    │  -> {hidden}d embedding       │")
+    lines.append(f"  └─────────────────────────┘    └─────────────────────────┘")
+    lines.append("")
+
+    teacher_size = estimate_size(
+        list(range(n_layers)), hidden, orig_vocab, t["intermediate_size"]
+    )
+    student_size = estimate_size(
+        layer_indices, hidden, p_vocab, t["intermediate_size"]
+    )
+    reduction = (1 - student_size["fp32_mb"] / teacher_size["fp32_mb"]) * 100
+
+    lines.append(f"  Size: {teacher_size['fp32_mb']}MB (FP32)           ->  {student_size['fp32_mb']}MB (FP32)")
+    lines.append(f"  Params: {teacher_size['total_params']:,}        ->  {student_size['total_params']:,}")
+    lines.append(f"  Reduction: {reduction:.1f}%")
+    lines.append(f"{'='*62}")
+    lines.append("```")
+
+    return "\n".join(lines)
+
+
 def _get_default_multilingual_samples() -> list[str]:
     return [
         "예약 좀 해줘", "지난번 주문 뭐였지?", "안녕하세요 반갑습니다",

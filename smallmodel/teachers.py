@@ -82,6 +82,13 @@ TEACHERS: dict[str, dict[str, Any]] = {
         "has_glu": True,
         "is_decoder": True,
         "license": "gemma",
+        "license_notice": (
+            "This model is a derivative of Google's Gemma. "
+            "Gemma is provided under and subject to the Gemma Terms of Use "
+            "found at [ai.google.dev/gemma/terms](https://ai.google.dev/gemma/terms). "
+            "Use of this model must comply with the "
+            "[Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy)."
+        ),
     },
     "qwen3": {
         "model_id": "Qwen/Qwen3-0.6B",

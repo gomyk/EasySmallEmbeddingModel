@@ -36,6 +36,8 @@ def main():
     p_compress.add_argument("--max-params", type=int, default=20_000_000)
     p_compress.add_argument("--min-layers", type=int, default=4)
     p_compress.add_argument("--min-vocab", type=int, default=None)
+    p_compress.add_argument("--pca", action="store_true",
+                            help="Use PCA-based hidden dim reduction")
     p_compress.add_argument("--output-dir", default="output")
 
     # create
@@ -112,6 +114,7 @@ def cmd_compress(args):
         max_fp32_mb=args.max_mb,
         min_layers=args.min_layers,
         min_vocab=args.min_vocab,
+        use_pca=args.pca,
     )
     print(f"\nDone: {path}")
 
