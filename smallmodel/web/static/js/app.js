@@ -51,6 +51,11 @@ async function switchTeacher(key) {
         `${t.is_decoder ? "Decoder" : "Encoder"}${t.has_glu ? " + GLU" : ""}`;
 
     // Update config inputs
+    const origHeads = t.num_attention_heads || (t.hidden_dim / 64);
+    document.getElementById("num-heads").value = origHeads;
+    document.getElementById("num-heads").max = origHeads;
+    document.getElementById("heads-hint").textContent = `original: ${origHeads} (head_dim=${Math.floor(t.hidden_dim / origHeads)})`;
+
     document.getElementById("hidden-dim").value = t.hidden_dim;
     document.getElementById("hidden-dim").max = t.hidden_dim;
     document.getElementById("hidden-hint").textContent = `original: ${t.hidden_dim}`;
@@ -191,6 +196,7 @@ async function updateEstimate() {
         return;
     }
 
+    const numHeads = parseInt(document.getElementById("num-heads").value) || null;
     const hiddenDim = parseInt(document.getElementById("hidden-dim").value) || currentTeacher.hidden_dim;
     const interSize = parseInt(document.getElementById("intermediate-size").value) || currentTeacher.intermediate_size;
     const vocabSize = parseInt(document.getElementById("vocab-size").value) || currentTeacher.vocab_size;
@@ -202,6 +208,7 @@ async function updateEstimate() {
             body: JSON.stringify({
                 teacher_key: currentTeacher.key,
                 layer_indices: indices,
+                num_attention_heads: numHeads,
                 hidden_dim: hiddenDim,
                 intermediate_size: interSize,
                 vocab_size: vocabSize,
@@ -236,7 +243,7 @@ async function updateEstimate() {
 // Config inputs trigger re-estimation + vocab coverage
 let vocabDebounce = null;
 document.addEventListener("DOMContentLoaded", () => {
-    ["hidden-dim", "intermediate-size", "vocab-size"].forEach(id => {
+    ["num-heads", "hidden-dim", "intermediate-size", "vocab-size"].forEach(id => {
         document.getElementById(id).addEventListener("input", debouncedEstimate);
     });
     document.getElementById("vocab-size").addEventListener("input", () => {

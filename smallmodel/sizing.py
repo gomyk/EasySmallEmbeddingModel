@@ -31,10 +31,11 @@ def estimate_size(
     else:
         embed_params += hidden_dim + 514 * hidden_dim + 2 * hidden_dim
 
-    if num_attention_heads and num_kv_heads:
+    if num_attention_heads:
         hd = head_dim if head_dim else (hidden_dim // num_attention_heads)
         q_dim = num_attention_heads * hd
-        kv_dim = num_kv_heads * hd
+        kv_heads = num_kv_heads if num_kv_heads else num_attention_heads
+        kv_dim = kv_heads * hd
         attn_params = hidden_dim * q_dim + hidden_dim * kv_dim * 2 + q_dim * hidden_dim
     else:
         attn_params = 4 * hidden_dim * hidden_dim
@@ -54,8 +55,13 @@ def estimate_for_teacher(
     vocab_size: int | None = None,
     hidden_dim: int | None = None,
     intermediate_size: int | None = None,
+    num_attention_heads: int | None = None,
 ) -> dict:
-    """Estimate size using teacher config defaults."""
+    """Estimate size using teacher config defaults.
+
+    When num_attention_heads is specified (head pruning), head_dim is preserved
+    from the original teacher config so attn_dim = num_heads * original_head_dim.
+    """
     t = TEACHERS[teacher_key]
     h = hidden_dim if hidden_dim is not None else t["hidden_dim"]
     inter = intermediate_size if intermediate_size is not None else t["intermediate_size"]
@@ -65,7 +71,16 @@ def estimate_for_teacher(
     n_kv = t.get("num_kv_heads")
     hd = t.get("head_dim")
 
-    if h != t["hidden_dim"] and n_heads:
+    # Head pruning: override num_heads, keep original head_dim
+    if num_attention_heads is not None:
+        original_head_dim = hd or (t["hidden_dim"] // t.get("num_attention_heads", 12))
+        n_heads = num_attention_heads
+        hd = original_head_dim
+        if n_kv:
+            n_kv = min(n_kv, n_heads)
+            while n_kv > 1 and n_heads % n_kv != 0:
+                n_kv -= 1
+    elif h != t["hidden_dim"] and n_heads:
         ratio = h / t["hidden_dim"]
         n_heads = max(1, int(n_heads * ratio))
         while h % n_heads != 0 and n_heads > 1:

@@ -46,7 +46,15 @@
         <!-- Config Controls -->
         <section class="panel" id="config-panel">
             <h2>3. Model Configuration</h2>
-            <div class="config-grid">
+            <div class="config-grid config-grid-4">
+                <div class="config-item">
+                    <label for="num-heads">
+                        Attention Heads
+                        <span class="info-badge" data-tooltip="Number of attention heads per layer. Each head has a fixed dimension (e.g. 64 for GTE). Reducing heads shrinks Q/K/V/O projection sizes while keeping hidden_dim unchanged. Fewer heads = lighter attention but less capacity to capture different patterns.">i</span>
+                    </label>
+                    <input type="number" id="num-heads" step="1" min="1">
+                    <span class="config-hint" id="heads-hint"></span>
+                </div>
                 <div class="config-item">
                     <label for="hidden-dim">
                         Hidden Dimension

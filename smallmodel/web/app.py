@@ -270,6 +270,7 @@ def create_app(sm: SmallModel) -> Flask:
                 "hidden_dim": t["hidden_dim"],
                 "intermediate_size": t["intermediate_size"],
                 "vocab_size": t["vocab_size"],
+                "num_attention_heads": t.get("num_attention_heads", t["hidden_dim"] // 64),
                 "is_decoder": t.get("is_decoder", False),
                 "has_glu": t.get("has_glu", False),
                 "total_params": est["total_params"],
@@ -285,6 +286,7 @@ def create_app(sm: SmallModel) -> Flask:
         hidden_dim = data.get("hidden_dim")
         intermediate_size = data.get("intermediate_size")
         vocab_size = data.get("vocab_size")
+        num_attention_heads = data.get("num_attention_heads")
 
         from smallmodel.sizing import estimate_for_teacher
         est = estimate_for_teacher(
@@ -292,6 +294,7 @@ def create_app(sm: SmallModel) -> Flask:
             vocab_size=vocab_size,
             hidden_dim=hidden_dim,
             intermediate_size=intermediate_size,
+            num_attention_heads=num_attention_heads,
         )
 
         from smallmodel.teachers import TEACHERS

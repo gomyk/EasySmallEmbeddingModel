@@ -234,6 +234,10 @@ button:hover {
     gap: 1rem;
 }
 
+.config-grid-4 {
+    grid-template-columns: repeat(4, 1fr);
+}
+
 .config-item {
     display: flex;
     flex-direction: column;

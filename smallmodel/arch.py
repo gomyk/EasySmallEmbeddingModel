@@ -56,6 +56,232 @@ def prune_layers(model, layer_indices: list[int], layer_accessor: str | None = N
     return model
 
 
+# ── Attention Head Pruning ───────────────────────────────────────
+
+def prune_attention_heads(model, num_heads_to_keep: int, layer_accessor: str | None = None):
+    """Prune attention heads by importance (L1 norm of output weights).
+
+    Keeps the hidden_dim unchanged. Only the internal attention projection
+    dimension is reduced: Q/K/V go from [hidden, hidden] to [hidden, heads*head_dim],
+    O goes from [hidden, hidden] to [heads*head_dim, hidden].
+
+    Supports:
+      - Fused QKV: qkv_proj [3*n_heads*head_dim, hidden] (GTE, etc.)
+      - Separate Q/K/V: query/key/value [n_heads*head_dim, hidden] (BERT, XLM-R)
+      - Decoder-style: q_proj/k_proj/v_proj (Qwen, Gemma, etc.)
+    """
+    if layer_accessor is None:
+        layer_accessor = discover_layer_accessor(model)
+
+    config = model.config
+    old_num_heads = config.num_attention_heads
+    head_dim = config.hidden_size // old_num_heads
+
+    if num_heads_to_keep >= old_num_heads:
+        return model
+
+    layers = get_layers(model, layer_accessor)
+
+    for layer_idx, layer in enumerate(layers):
+        # Find attention module and weight names
+        attn_info = _find_attention_weights(layer)
+        if attn_info is None:
+            print(f"  Warning: could not find attention weights in layer {layer_idx}")
+            continue
+
+        # Score heads by L1 norm of output projection
+        o_weight = attn_info["o_weight"]  # [hidden, n_heads*head_dim] or transposed
+        head_scores = _score_heads(o_weight, old_num_heads, head_dim)
+
+        # Select top-k heads
+        _, keep_indices = torch.topk(head_scores, num_heads_to_keep)
+        keep_indices = keep_indices.sort().values
+
+        # Prune Q, K, V, O
+        _apply_head_pruning(attn_info, keep_indices, old_num_heads, head_dim)
+
+    # Update config
+    config.num_attention_heads = num_heads_to_keep
+    # Store original head_dim so custom model code can use it
+    config.head_dim = head_dim
+    if hasattr(config, 'num_key_value_heads') and config.num_key_value_heads is not None:
+        # Scale KV heads proportionally
+        old_kv = config.num_key_value_heads
+        new_kv = max(1, int(old_kv * num_heads_to_keep / old_num_heads))
+        while num_heads_to_keep % new_kv != 0 and new_kv > 1:
+            new_kv -= 1
+        config.num_key_value_heads = new_kv
+
+    print(f"  Head pruning: {old_num_heads} -> {num_heads_to_keep} heads "
+          f"(attn dim: {old_num_heads*head_dim} -> {num_heads_to_keep*head_dim})")
+    return model
+
+
+def _find_attention_weights(layer) -> dict | None:
+    """Detect attention weight layout in a transformer layer."""
+    result = {}
+
+    # Try fused QKV (GTE style: attention.qkv_proj)
+    for name, param in layer.named_parameters():
+        lname = name.lower()
+        if "qkv_proj" in lname or "qkv" in lname and "weight" in lname:
+            result["qkv_weight"] = param
+            result["qkv_name"] = name
+            # Find bias
+            bias_name = name.replace("weight", "bias")
+            for n2, p2 in layer.named_parameters():
+                if n2 == bias_name:
+                    result["qkv_bias"] = p2
+                    break
+            result["fused_qkv"] = True
+            break
+
+    # Try separate Q/K/V (BERT style or decoder style)
+    if "qkv_weight" not in result:
+        q_patterns = ["query.weight", "q_proj.weight", "self.query.weight"]
+        k_patterns = ["key.weight", "k_proj.weight", "self.key.weight"]
+        v_patterns = ["value.weight", "v_proj.weight", "self.value.weight"]
+
+        for name, param in layer.named_parameters():
+            for pat in q_patterns:
+                if name.endswith(pat):
+                    result["q_weight"] = param
+                    bias_name = name.replace("weight", "bias")
+                    for n2, p2 in layer.named_parameters():
+                        if n2 == bias_name:
+                            result["q_bias"] = p2
+            for pat in k_patterns:
+                if name.endswith(pat):
+                    result["k_weight"] = param
+                    bias_name = name.replace("weight", "bias")
+                    for n2, p2 in layer.named_parameters():
+                        if n2 == bias_name:
+                            result["k_bias"] = p2
+            for pat in v_patterns:
+                if name.endswith(pat):
+                    result["v_weight"] = param
+                    bias_name = name.replace("weight", "bias")
+                    for n2, p2 in layer.named_parameters():
+                        if n2 == bias_name:
+                            result["v_bias"] = p2
+
+        if "q_weight" in result:
+            result["fused_qkv"] = False
+
+    # Find output projection
+    o_patterns = ["o_proj.weight", "output.dense.weight", "attention.output.dense.weight",
+                  "out_proj.weight", "dense.weight"]
+    for name, param in layer.named_parameters():
+        for pat in o_patterns:
+            if name.endswith(pat) and "attention" in name.lower():
+                result["o_weight"] = param
+                bias_name = name.replace("weight", "bias")
+                for n2, p2 in layer.named_parameters():
+                    if n2 == bias_name:
+                        result["o_bias"] = p2
+                break
+        if "o_weight" in result:
+            break
+
+    # Fallback: find o_proj by shape matching
+    if "o_weight" not in result:
+        for name, param in layer.named_parameters():
+            if "o_proj" in name and "weight" in name:
+                result["o_weight"] = param
+                break
+
+    if "o_weight" not in result:
+        return None
+    if "qkv_weight" not in result and "q_weight" not in result:
+        return None
+
+    return result
+
+
+def _score_heads(o_weight: torch.Tensor, num_heads: int, head_dim: int) -> torch.Tensor:
+    """Score attention heads by L1 norm of their output projection weights."""
+    w = o_weight.data.float()
+    # o_proj: [hidden, num_heads*head_dim] — each head occupies head_dim columns
+    if w.shape[1] == num_heads * head_dim:
+        # [hidden, n_heads*head_dim] → group by head
+        w_heads = w.view(w.shape[0], num_heads, head_dim)  # [H, n, d]
+        scores = w_heads.abs().sum(dim=(0, 2))  # [n]
+    elif w.shape[0] == num_heads * head_dim:
+        # Transposed: [n_heads*head_dim, hidden]
+        w_heads = w.view(num_heads, head_dim, w.shape[1])
+        scores = w_heads.abs().sum(dim=(1, 2))
+    else:
+        # Fallback: uniform scores
+        scores = torch.ones(num_heads)
+    return scores
+
+
+def _apply_head_pruning(attn_info: dict, keep_indices: torch.Tensor, num_heads: int, head_dim: int):
+    """In-place prune attention weights to keep only selected heads."""
+    keep = keep_indices.tolist()
+    n_keep = len(keep)
+
+    # Build index mask for head_dim-sized chunks
+    keep_dims = []
+    for h in keep:
+        keep_dims.extend(range(h * head_dim, (h + 1) * head_dim))
+    keep_dims = torch.tensor(keep_dims, dtype=torch.long)
+
+    if attn_info.get("fused_qkv"):
+        # QKV fused: [3*n_heads*head_dim, hidden]
+        w = attn_info["qkv_weight"]
+        # Split into Q, K, V chunks
+        qkv_dim = num_heads * head_dim
+        q_w = w.data[:qkv_dim]
+        k_w = w.data[qkv_dim:2*qkv_dim]
+        v_w = w.data[2*qkv_dim:3*qkv_dim]
+
+        new_q = q_w[keep_dims]
+        new_k = k_w[keep_dims]
+        new_v = v_w[keep_dims]
+        new_w = torch.cat([new_q, new_k, new_v], dim=0)
+
+        # Replace parameter data in-place via module
+        _replace_param_data(attn_info["qkv_weight"], new_w)
+
+        if "qkv_bias" in attn_info:
+            b = attn_info["qkv_bias"]
+            q_b, k_b, v_b = b.data[:qkv_dim], b.data[qkv_dim:2*qkv_dim], b.data[2*qkv_dim:]
+            new_b = torch.cat([q_b[keep_dims], k_b[keep_dims], v_b[keep_dims]])
+            _replace_param_data(b, new_b)
+    else:
+        # Separate Q, K, V
+        for key in ["q_weight", "k_weight", "v_weight"]:
+            if key in attn_info:
+                w = attn_info[key]
+                if w.shape[0] == num_heads * head_dim:
+                    _replace_param_data(w, w.data[keep_dims])
+                elif w.shape[1] == num_heads * head_dim:
+                    _replace_param_data(w, w.data[:, keep_dims])
+
+        for key in ["q_bias", "k_bias", "v_bias"]:
+            if key in attn_info:
+                b = attn_info[key]
+                if b.shape[0] == num_heads * head_dim:
+                    _replace_param_data(b, b.data[keep_dims])
+
+    # Output projection
+    o_w = attn_info["o_weight"]
+    if o_w.shape[1] == num_heads * head_dim:
+        _replace_param_data(o_w, o_w.data[:, keep_dims])
+    elif o_w.shape[0] == num_heads * head_dim:
+        _replace_param_data(o_w, o_w.data[keep_dims])
+
+    if "o_bias" in attn_info:
+        # o_bias is [hidden_dim], doesn't change with head pruning
+        pass
+
+
+def _replace_param_data(param: nn.Parameter, new_data: torch.Tensor):
+    """Replace parameter data in-place (keeps the same Parameter object)."""
+    param.data = new_data
+
+
 def create_pruned_student(teacher_model_id: str, layer_indices: list[int],
                           layer_accessor: str | None = None,
                           trust_remote_code: bool = False):
@@ -293,6 +519,50 @@ def save_as_sentence_transformer(model, tokenizer, save_path: str):
     model.save_pretrained(hf_tmp)
     tokenizer.save_pretrained(hf_tmp)
 
+    # Fix config for head-pruned models:
+    # If attention weights don't match config expectations, adjust config
+    config_path_tmp = os.path.join(hf_tmp, "config.json")
+    if os.path.exists(config_path_tmp):
+        with open(config_path_tmp, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        # Detect actual attention dim from saved weights
+        import safetensors.torch
+        for wf in ["model.safetensors", "pytorch_model.bin"]:
+            wp = os.path.join(hf_tmp, wf)
+            if os.path.exists(wp):
+                if wf.endswith(".safetensors"):
+                    sd = safetensors.torch.load_file(wp)
+                else:
+                    sd = torch.load(wp, map_location="cpu", weights_only=True)
+                # Find a qkv or query weight to detect actual head count
+                for k, v in sd.items():
+                    if "qkv_proj.weight" in k:
+                        # fused QKV: [3*attn_dim, hidden]
+                        attn_dim = v.shape[0] // 3
+                        n_heads_cfg = cfg.get("num_attention_heads", 12)
+                        if "head_dim" in cfg:
+                            hd = cfg["head_dim"]
+                        else:
+                            hd = cfg["hidden_size"] // n_heads_cfg
+                        actual_heads = attn_dim // hd
+                        cfg["num_attention_heads"] = actual_heads
+                        cfg["head_dim"] = hd
+                        break
+                    if "query.weight" in k or "q_proj.weight" in k:
+                        attn_dim = v.shape[0]
+                        n_heads_cfg = cfg.get("num_attention_heads", 12)
+                        if "head_dim" in cfg:
+                            hd = cfg["head_dim"]
+                        else:
+                            hd = cfg["hidden_size"] // n_heads_cfg
+                        actual_heads = attn_dim // hd
+                        cfg["num_attention_heads"] = actual_heads
+                        cfg["head_dim"] = hd
+                        break
+                break
+        with open(config_path_tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+
     config_path = os.path.join(hf_tmp, "config.json")
     is_custom = False
     if os.path.exists(config_path):
@@ -309,6 +579,9 @@ def save_as_sentence_transformer(model, tokenizer, save_path: str):
             config.pop("_name_or_path", None)
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
+
+    # Patch custom model code to support head_dim from config (for head-pruned models)
+    _patch_modeling_for_head_pruning(hf_tmp)
 
     os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
     word_model = st_models.Transformer(
@@ -402,6 +675,52 @@ def _prune_embeddings(model, keep_ids):
     model.set_input_embeddings(new_emb)
     model.config.vocab_size = new_vocab_size
     return model
+
+
+def _patch_modeling_for_head_pruning(model_dir: str):
+    """Patch custom modeling.py to support head_dim from config.
+
+    After head pruning, num_attention_heads changes but head_dim should stay
+    the same (e.g. 64). Custom model code often computes head_dim as
+    hidden_size // num_attention_heads, which breaks. This patches the code
+    to use config.head_dim when available.
+    """
+    modeling_path = os.path.join(model_dir, "modeling.py")
+    if not os.path.exists(modeling_path):
+        return
+
+    with open(modeling_path, "r", encoding="utf-8") as f:
+        code = f.read()
+
+    # Check if there's a head_dim in config.json
+    config_path = os.path.join(model_dir, "config.json")
+    if not os.path.exists(config_path):
+        return
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    if "head_dim" not in cfg:
+        return
+
+    # Patch: replace `int(config.hidden_size / config.num_attention_heads)`
+    # with `getattr(config, 'head_dim', int(config.hidden_size / config.num_attention_heads))`
+    old_pattern = "int(config.hidden_size / config.num_attention_heads)"
+    new_pattern = "getattr(config, 'head_dim', int(config.hidden_size / config.num_attention_heads))"
+
+    if old_pattern in code and new_pattern not in code:
+        code = code.replace(old_pattern, new_pattern)
+
+        # Also patch o_proj to use all_head_size instead of hidden_size
+        # Original: nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+        # For the output projection after head pruning
+        old_o = "self.o_proj = nn.Linear(config.hidden_size, config.hidden_size"
+        new_o = "self.o_proj = nn.Linear(self.all_head_size, config.hidden_size"
+        if old_o in code:
+            code = code.replace(old_o, new_o)
+
+        with open(modeling_path, "w", encoding="utf-8") as f:
+            f.write(code)
+        print(f"  Patched {modeling_path} for head_dim support")
 
 
 def _copy_custom_code_files(model, target_dir):
