@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections import Counter
 from typing import TYPE_CHECKING
 
@@ -513,6 +514,212 @@ def create_app(sm: SmallModel) -> Flask:
             })
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 500
+
+    # ── Distillation (SSE streaming) ────────────────────────────
+
+    _distill_progress: dict = {}  # session_id -> DistillProgress
+
+    @app.route("/api/distill/start", methods=["POST"])
+    def distill_start():
+        """Start distillation in a background thread."""
+        import threading
+        from smallmodel.web.distill_runner import DistillProgress, run_distillation
+
+        data = request.json
+        teacher_path = data.get("teacher_path", "")
+        student_path = data.get("student_path", "")
+        output_path = data.get("output_path", "")
+        dataset_keys = data.get("datasets", list(DISTILL_DATASETS.keys()))
+        epochs = data.get("epochs", 10)
+        batch_size = data.get("batch_size", 32)
+        lr = data.get("lr", 2e-5)
+        patience = data.get("patience", 3)
+        device = data.get("device", "cpu")
+        cos_weight = data.get("cos_weight", 0.5)
+        mse_weight = data.get("mse_weight", 1.0)
+        max_length = data.get("max_length", 64)
+        save_every_epoch = data.get("save_every_epoch", True)
+
+        # Resolve teacher path from key
+        if teacher_path in TEACHERS_MAP:
+            from smallmodel.teachers import TEACHERS
+            t = TEACHERS[teacher_path]
+            trust_teacher = t.get("trust_remote_code", False)
+            teacher_path = t["model_id"]
+        else:
+            trust_teacher = False
+
+        if not teacher_path or not student_path:
+            return jsonify({"status": "error", "message": "teacher_path and student_path required"}), 400
+
+        if not output_path:
+            output_path = student_path + "_distilled"
+
+        # Load dataset texts
+        print(f"[distill] Loading {len(dataset_keys)} datasets...")
+        texts = _load_dataset_texts(dataset_keys, max_per_dataset=5000)
+        if not texts:
+            return jsonify({"status": "error", "message": "No texts loaded from datasets"}), 400
+        print(f"[distill] Loaded {len(texts):,} texts")
+
+        # Create progress tracker
+        session_id = f"distill_{int(time.time())}"
+        progress = DistillProgress()
+        _distill_progress[session_id] = progress
+
+        # Start background thread
+        thread = threading.Thread(
+            target=run_distillation,
+            kwargs={
+                "teacher_path": teacher_path,
+                "student_path": student_path,
+                "output_path": output_path,
+                "texts": texts,
+                "progress": progress,
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "lr": lr,
+                "max_length": max_length,
+                "cos_weight": cos_weight,
+                "mse_weight": mse_weight,
+                "patience": patience,
+                "device": device,
+                "trust_remote_code_teacher": trust_teacher,
+                "save_every_epoch": save_every_epoch,
+            },
+            daemon=True,
+        )
+        thread.start()
+
+        return jsonify({"status": "ok", "session_id": session_id})
+
+    @app.route("/api/distill/stream/<session_id>")
+    def distill_stream(session_id):
+        """SSE endpoint for real-time distillation progress."""
+        from flask import Response
+
+        progress = _distill_progress.get(session_id)
+        if not progress:
+            return jsonify({"error": "session not found"}), 404
+
+        return Response(
+            progress.stream(),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.route("/api/distill/stop/<session_id>", methods=["POST"])
+    def distill_stop(session_id):
+        """Request early stop for a running distillation."""
+        progress = _distill_progress.get(session_id)
+        if progress and progress.running:
+            progress.finished = True
+            return jsonify({"status": "ok"})
+        return jsonify({"status": "not_running"})
+
+    @app.route("/api/models")
+    def list_models():
+        """List locally available student models for distillation source/target."""
+        import glob as _glob
+
+        models = []
+        students_base = os.path.join(sm.output_dir, "students")
+        if os.path.isdir(students_base):
+            for teacher_dir in os.listdir(students_base):
+                teacher_path = os.path.join(students_base, teacher_dir)
+                if not os.path.isdir(teacher_path):
+                    continue
+                for model_name in os.listdir(teacher_path):
+                    model_path = os.path.join(teacher_path, model_name)
+                    if not os.path.isdir(model_path):
+                        continue
+                    # Check if it has model files
+                    has_model = any(
+                        os.path.exists(os.path.join(model_path, f))
+                        for f in ["config.json", "modules.json"]
+                    )
+                    if has_model:
+                        size_mb = 0
+                        for fname in ["model.safetensors", "pytorch_model.bin"]:
+                            for p in [model_path, os.path.join(model_path, "0_Transformer")]:
+                                fp = os.path.join(p, fname)
+                                if os.path.exists(fp):
+                                    size_mb = os.path.getsize(fp) / (1024**2)
+                                    break
+                        models.append({
+                            "name": f"{teacher_dir}/{model_name}",
+                            "path": model_path,
+                            "size_mb": round(size_mb, 1),
+                        })
+
+        # Also list registered teachers as sources
+        from smallmodel.teachers import TEACHERS
+        teacher_list = []
+        for key, t in TEACHERS.items():
+            teacher_list.append({
+                "key": key,
+                "model_id": t["model_id"],
+                "short_name": t["short_name"],
+            })
+
+        return jsonify({"local_models": models, "teachers": teacher_list})
+
+    @app.route("/api/device-info")
+    def device_info():
+        """Return available compute devices."""
+        import torch
+        devices = [{"id": "cpu", "name": "CPU"}]
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                name = torch.cuda.get_device_name(i)
+                mem = torch.cuda.get_device_properties(i).total_mem / (1024**3)
+                devices.append({
+                    "id": f"cuda:{i}" if i > 0 else "cuda",
+                    "name": f"GPU {i}: {name} ({mem:.1f}GB)",
+                })
+        return jsonify({"devices": devices})
+
+    # ── HuggingFace Upload ───────────────────────────────────────
+
+    @app.route("/api/upload", methods=["POST"])
+    def upload_to_hub():
+        """Upload a model to HuggingFace Hub."""
+        data = request.json
+        model_path = data.get("model_path", "")
+        repo_id = data.get("repo_id", "")
+        hf_token = data.get("hf_token", "")
+
+        if not model_path or not repo_id or not hf_token:
+            return jsonify({"status": "error", "message": "model_path, repo_id, hf_token required"}), 400
+
+        if not os.path.isdir(model_path):
+            return jsonify({"status": "error", "message": f"Model not found: {model_path}"}), 400
+
+        try:
+            from huggingface_hub import HfApi, create_repo, upload_folder
+
+            api = HfApi(token=hf_token)
+            create_repo(repo_id, token=hf_token, exist_ok=True)
+            upload_folder(
+                repo_id=repo_id,
+                folder_path=model_path,
+                token=hf_token,
+                commit_message=f"Upload model from SmallModel web UI",
+            )
+            return jsonify({
+                "status": "ok",
+                "url": f"https://huggingface.co/{repo_id}",
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    # Helper for teacher lookup
+    TEACHERS_MAP = set()
+    try:
+        from smallmodel.teachers import TEACHERS as _T
+        TEACHERS_MAP = set(_T.keys())
+    except Exception:
+        pass
 
     return app
 

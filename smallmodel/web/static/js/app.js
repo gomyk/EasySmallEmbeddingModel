@@ -585,3 +585,291 @@ function showStatus(type, message) {
     el.className = `status-box ${type}`;
     el.textContent = message;
 }
+
+// ── Distillation ────────────────────────────────────────────────
+
+let distillSessionId = null;
+let distillEventSource = null;
+
+async function loadDevices() {
+    const resp = await fetch("/api/device-info");
+    const data = await resp.json();
+    const sel = document.getElementById("distill-device");
+    sel.innerHTML = "";
+    data.devices.forEach(d => {
+        const opt = document.createElement("option");
+        opt.value = d.id;
+        opt.textContent = d.name;
+        sel.appendChild(opt);
+    });
+    // Default to GPU if available
+    if (data.devices.length > 1) sel.value = data.devices[1].id;
+}
+
+async function refreshModels() {
+    const resp = await fetch("/api/models");
+    const data = await resp.json();
+
+    // Teacher select
+    const teacherSel = document.getElementById("distill-teacher");
+    teacherSel.innerHTML = "";
+    data.teachers.forEach(t => {
+        const opt = document.createElement("option");
+        opt.value = t.key;
+        opt.textContent = `${t.short_name} (${t.model_id})`;
+        teacherSel.appendChild(opt);
+    });
+
+    // Student select
+    const studentSel = document.getElementById("distill-student");
+    studentSel.innerHTML = "";
+    data.local_models.forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.path;
+        opt.textContent = `${m.name} (${m.size_mb}MB)`;
+        studentSel.appendChild(opt);
+    });
+
+    // Upload model select
+    const uploadSel = document.getElementById("upload-model");
+    uploadSel.innerHTML = "";
+    data.local_models.forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.path;
+        opt.textContent = `${m.name} (${m.size_mb}MB)`;
+        uploadSel.appendChild(opt);
+    });
+}
+
+async function startDistill() {
+    const teacherPath = document.getElementById("distill-teacher").value;
+    const studentPath = document.getElementById("distill-student").value;
+    const outputPath = document.getElementById("distill-output").value || "";
+
+    if (!teacherPath || !studentPath) {
+        alert("Select both teacher and student models.");
+        return;
+    }
+
+    const payload = {
+        teacher_path: teacherPath,
+        student_path: studentPath,
+        output_path: outputPath,
+        datasets: getSelectedDatasets(),
+        epochs: parseInt(document.getElementById("distill-epochs").value) || 10,
+        batch_size: parseInt(document.getElementById("distill-batch").value) || 32,
+        lr: parseFloat(document.getElementById("distill-lr").value) || 2e-5,
+        patience: parseInt(document.getElementById("distill-patience").value) || 3,
+        device: document.getElementById("distill-device").value || "cpu",
+        cos_weight: parseFloat(document.getElementById("distill-cos").value) || 0.5,
+        mse_weight: parseFloat(document.getElementById("distill-mse").value) || 1.0,
+        max_length: parseInt(document.getElementById("distill-maxlen").value) || 64,
+        save_every_epoch: document.getElementById("distill-save-every").checked,
+    };
+
+    document.getElementById("btn-distill").disabled = true;
+    document.getElementById("btn-distill-stop").disabled = false;
+    document.getElementById("distill-progress").style.display = "block";
+    document.getElementById("dp-log").innerHTML = "";
+    document.getElementById("dp-status").textContent = "Starting...";
+
+    try {
+        const resp = await fetch("/api/distill/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const result = await resp.json();
+
+        if (result.status !== "ok") {
+            logDistill("error", `Error: ${result.message}`);
+            document.getElementById("btn-distill").disabled = false;
+            return;
+        }
+
+        distillSessionId = result.session_id;
+        connectDistillSSE(distillSessionId);
+    } catch (e) {
+        logDistill("error", `Request failed: ${e.message}`);
+        document.getElementById("btn-distill").disabled = false;
+    }
+}
+
+function connectDistillSSE(sessionId) {
+    if (distillEventSource) distillEventSource.close();
+
+    distillEventSource = new EventSource(`/api/distill/stream/${sessionId}`);
+
+    distillEventSource.addEventListener("status", (e) => {
+        const d = JSON.parse(e.data);
+        document.getElementById("dp-status").textContent = d.message;
+        logDistill("info", d.message);
+    });
+
+    distillEventSource.addEventListener("config", (e) => {
+        const d = JSON.parse(e.data);
+        document.getElementById("dp-total-epochs").textContent = d.epochs;
+        document.getElementById("dp-total-batches").textContent = d.total_batches;
+        logDistill("info", `Config: ${d.total_texts.toLocaleString()} texts, ${d.total_batches} batches/epoch, device=${d.device}`);
+    });
+
+    distillEventSource.addEventListener("epoch_start", (e) => {
+        const d = JSON.parse(e.data);
+        document.getElementById("dp-epoch").textContent = d.epoch;
+        document.getElementById("dp-status").textContent = `Epoch ${d.epoch}/${d.total_epochs}`;
+        document.getElementById("dp-batch-bar").style.width = "0%";
+        logDistill("epoch", `Epoch ${d.epoch}/${d.total_epochs} started`);
+    });
+
+    distillEventSource.addEventListener("batch", (e) => {
+        const d = JSON.parse(e.data);
+        const pct = (d.batch / d.total_batches * 100).toFixed(1);
+        document.getElementById("dp-batch").textContent = d.batch;
+        document.getElementById("dp-batch-bar").style.width = `${pct}%`;
+        document.getElementById("dp-batch-loss").textContent = `loss: ${d.loss}`;
+        document.getElementById("dp-current-loss").textContent = d.loss;
+        document.getElementById("dp-mse").textContent = d.mse_loss;
+        document.getElementById("dp-cosine").textContent = d.cos_loss;
+        document.getElementById("dp-lr").textContent = d.lr.toExponential(1);
+
+        // ETA
+        if (d.eta_total_sec > 0) {
+            document.getElementById("dp-eta").textContent = `ETA: ${formatTime(d.eta_total_sec)}`;
+        }
+
+        // Epoch bar
+        const epochPct = ((d.epoch - 1) / parseInt(document.getElementById("dp-total-epochs").textContent) * 100 +
+                          pct / parseInt(document.getElementById("dp-total-epochs").textContent)).toFixed(1);
+        document.getElementById("dp-epoch-bar").style.width = `${Math.min(epochPct, 100)}%`;
+    });
+
+    distillEventSource.addEventListener("epoch_end", (e) => {
+        const d = JSON.parse(e.data);
+        document.getElementById("dp-epoch-loss").textContent = `avg: ${d.avg_loss}`;
+        document.getElementById("dp-best-loss").textContent = d.best_loss;
+        document.getElementById("dp-patience-count").textContent = `${d.no_improve_count}/${d.patience}`;
+        document.getElementById("dp-epoch-bar").style.width = `${d.epoch / d.total_epochs * 100}%`;
+
+        if (d.eta_remaining_sec > 0) {
+            document.getElementById("dp-eta").textContent = `ETA: ${formatTime(d.eta_remaining_sec)}`;
+        }
+
+        const tag = d.improved ? "save" : "warn";
+        logDistill(tag, `Epoch ${d.epoch}: avg_loss=${d.avg_loss}, best=${d.best_loss}${d.improved ? " (improved)" : ` (no improve ${d.no_improve_count}/${d.patience})`} [${formatTime(d.epoch_time_sec)}]`);
+    });
+
+    distillEventSource.addEventListener("model_saved", (e) => {
+        const d = JSON.parse(e.data);
+        logDistill("save", `Model saved: ${d.path} (${d.label}, loss=${d.loss})`);
+    });
+
+    distillEventSource.addEventListener("early_stop", (e) => {
+        const d = JSON.parse(e.data);
+        logDistill("warn", `Early stopping at epoch ${d.epoch} (patience=${d.patience}, best_loss=${d.best_loss})`);
+    });
+
+    distillEventSource.addEventListener("complete", (e) => {
+        const d = JSON.parse(e.data);
+        document.getElementById("dp-status").textContent = "Complete!";
+        document.getElementById("dp-eta").textContent = `Total: ${formatTime(d.total_time_sec)}`;
+        document.getElementById("dp-epoch-bar").style.width = "100%";
+        logDistill("save", `Distillation complete! Best loss: ${d.best_loss}, ${d.total_epochs_run} epochs, ${formatTime(d.total_time_sec)}`);
+        logDistill("save", `Output: ${d.output_path}`);
+        onDistillDone();
+    });
+
+    distillEventSource.addEventListener("error", (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            logDistill("error", `Error: ${d.message}`);
+        } catch (_) {}
+        document.getElementById("dp-status").textContent = "Error";
+        onDistillDone();
+    });
+
+    distillEventSource.addEventListener("done", () => {
+        onDistillDone();
+    });
+
+    distillEventSource.onerror = () => {
+        // SSE connection closed
+    };
+}
+
+function onDistillDone() {
+    document.getElementById("btn-distill").disabled = false;
+    document.getElementById("btn-distill-stop").disabled = true;
+    if (distillEventSource) { distillEventSource.close(); distillEventSource = null; }
+    refreshModels(); // Refresh model list to show new distilled models
+}
+
+async function stopDistill() {
+    if (distillSessionId) {
+        await fetch(`/api/distill/stop/${distillSessionId}`, { method: "POST" });
+        logDistill("warn", "Stop requested...");
+    }
+}
+
+function logDistill(type, message) {
+    const log = document.getElementById("dp-log");
+    const line = document.createElement("div");
+    line.className = `log-${type}`;
+    const ts = new Date().toLocaleTimeString();
+    line.textContent = `[${ts}] ${message}`;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+}
+
+function formatTime(sec) {
+    if (sec < 60) return `${Math.round(sec)}s`;
+    if (sec < 3600) return `${Math.floor(sec/60)}m ${Math.round(sec%60)}s`;
+    return `${Math.floor(sec/3600)}h ${Math.floor((sec%3600)/60)}m`;
+}
+
+// ── HuggingFace Upload ──────────────────────────────────────────
+
+async function uploadModel() {
+    const modelPath = document.getElementById("upload-model").value;
+    const repoId = document.getElementById("upload-repo").value;
+    const token = document.getElementById("upload-token").value;
+
+    if (!modelPath || !repoId || !token) {
+        showUploadStatus("error", "All fields are required.");
+        return;
+    }
+
+    showUploadStatus("loading", "Uploading to HuggingFace...");
+    document.getElementById("btn-upload").disabled = true;
+
+    try {
+        const resp = await fetch("/api/upload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model_path: modelPath, repo_id: repoId, hf_token: token }),
+        });
+        const result = await resp.json();
+
+        if (result.status === "ok") {
+            showUploadStatus("success", `Uploaded successfully: ${result.url}`);
+        } else {
+            showUploadStatus("error", `Error: ${result.message}`);
+        }
+    } catch (e) {
+        showUploadStatus("error", `Request failed: ${e.message}`);
+    } finally {
+        document.getElementById("btn-upload").disabled = false;
+    }
+}
+
+function showUploadStatus(type, message) {
+    const el = document.getElementById("upload-status");
+    el.className = `status-box ${type}`;
+    el.textContent = message;
+}
+
+// ── Init: load devices & models ─────────────────────────────────
+
+document.addEventListener("DOMContentLoaded", async () => {
+    await loadDevices();
+    await refreshModels();
+});

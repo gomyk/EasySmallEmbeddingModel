@@ -25,7 +25,7 @@
         <!-- Layer Editor -->
         <section class="panel" id="layer-panel">
             <h2>2. Select Layers
-                <span class="info-badge" data-tooltip="Teacher 모델의 Transformer 레이어를 선택/해제합니다. 선택된 레이어만 Student 모델에 포함됩니다. 첫 번째 레이어(L0)는 기본적인 토큰 표현을, 마지막 레이어는 의미적 표현을 담당합니다. 균등 간격(Uniform)이 일반적으로 가장 좋은 성능을 보입니다.">i</span>
+                <span class="info-badge" data-tooltip="Select or deselect Transformer layers from the Teacher model. Only selected layers will be included in the Student. The first layer (L0) handles basic token representation, while the last layer captures semantic meaning. Uniform spacing generally gives the best performance.">i</span>
             </h2>
             <div class="layer-controls">
                 <div class="presets">
@@ -50,7 +50,7 @@
                 <div class="config-item">
                     <label for="hidden-dim">
                         Hidden Dimension
-                        <span class="info-badge" data-tooltip="각 레이어의 입출력 벡터 차원이자 최종 임베딩 차원입니다. 모든 레이어에서 동일하게 사용됩니다. 작을수록 모델이 가벼워지지만 표현력도 줄어듭니다. 64 단위로 조절하세요.">i</span>
+                        <span class="info-badge" data-tooltip="The input/output vector dimension for each layer and the final embedding dimension. Shared across all layers. Smaller = lighter model but less expressiveness. Adjust in multiples of 64.">i</span>
                     </label>
                     <input type="number" id="hidden-dim" step="64" min="64">
                     <span class="config-hint" id="hidden-hint"></span>
@@ -58,7 +58,7 @@
                 <div class="config-item">
                     <label for="intermediate-size">
                         Intermediate Size
-                        <span class="info-badge" data-tooltip="FFN(Feed-Forward Network) 내부 확장 차원입니다. 각 레이어의 Attention 뒤에 오는 FFN에서 hidden_dim → intermediate → hidden_dim 으로 확장/축소됩니다. 보통 hidden_dim의 4배 (768→3072). 모델 파라미터의 상당 부분을 차지하므로, 줄이면 모델이 크게 가벼워집니다.">i</span>
+                        <span class="info-badge" data-tooltip="Internal expansion dimension of the Feed-Forward Network (FFN). In each layer the FFN expands as hidden_dim → intermediate → hidden_dim. Typically 4x hidden_dim (768→3072). Accounts for a large portion of model parameters, so reducing it significantly shrinks the model.">i</span>
                     </label>
                     <input type="number" id="intermediate-size" step="64" min="64">
                     <span class="config-hint" id="inter-hint"></span>
@@ -66,7 +66,7 @@
                 <div class="config-item">
                     <label for="vocab-size">
                         Vocab Size
-                        <span class="info-badge" data-tooltip="토크나이저의 어휘 수입니다. Embedding 레이어 크기가 vocab_size × hidden_dim 으로 결정됩니다. 원본 모델은 250K+ 어휘를 가지지만, 코퍼스에 등장하지 않는 희귀 토큰을 제거하면 크기를 대폭 줄일 수 있습니다. 다국어 지원 시 최소 3,000 이상 권장합니다.">i</span>
+                        <span class="info-badge" data-tooltip="Tokenizer vocabulary size. Embedding layer size = vocab_size × hidden_dim. The original model has 250K+ tokens, but removing rare tokens not in your corpus can significantly reduce size. Minimum 3,000 recommended for multilingual support.">i</span>
                     </label>
                     <input type="number" id="vocab-size" step="1000" min="1000">
                     <span class="config-hint" id="vocab-hint"></span>
@@ -77,14 +77,14 @@
         <!-- Dataset & Task Selection + Vocab Coverage -->
         <section class="panel" id="data-panel">
             <h2>4. Data & Vocab Coverage
-                <span class="info-badge" data-tooltip="Distillation에 사용할 데이터셋과 평가에 사용할 MTEB 태스크를 선택합니다. 선택한 데이터셋을 토크나이징하여 Vocab Size에 따른 토큰 커버리지를 실시간으로 확인할 수 있습니다.">i</span>
+                <span class="info-badge" data-tooltip="Select datasets for distillation and MTEB tasks for evaluation. Tokenize selected datasets and monitor token coverage in real-time as you adjust Vocab Size.">i</span>
             </h2>
 
             <div class="data-grid">
                 <!-- Distillation Datasets -->
                 <div class="data-column">
                     <h3>Distillation Datasets
-                        <span class="info-badge" data-tooltip="Student 모델 학습(Knowledge Distillation)에 사용될 텍스트 데이터셋입니다. Teacher의 임베딩을 Student가 재현하도록 학습할 때 이 텍스트들을 사용합니다. Vocab pruning 시에도 이 데이터셋의 토큰 빈도를 기준으로 합니다.">i</span>
+                        <span class="info-badge" data-tooltip="Text datasets for Knowledge Distillation training. Used to train the Student to reproduce the Teacher's embeddings. Token frequency from these datasets is also used for vocab pruning.">i</span>
                     </h3>
                     <div class="dataset-group-toggle">
                         <button onclick="toggleDatasetGroup('all')">All</button>
@@ -98,7 +98,7 @@
                 <!-- Evaluation Tasks -->
                 <div class="data-column">
                     <h3>Evaluation Tasks (MTEB)
-                        <span class="info-badge" data-tooltip="Student 모델의 품질을 측정할 MTEB 벤치마크 태스크입니다. Classification(분류), Clustering(군집화), STS(문장 유사도) 세 그룹이 있습니다. 평가에만 사용되며 모델 생성에는 영향을 주지 않습니다.">i</span>
+                        <span class="info-badge" data-tooltip="MTEB benchmark tasks to measure Student model quality. Three groups: Classification, Clustering, and STS (Sentence Similarity). Used only for evaluation; does not affect model creation.">i</span>
                     </h3>
                     <div class="dataset-group-toggle">
                         <button onclick="toggleEvalGroup('all')">All</button>
@@ -114,7 +114,7 @@
             <!-- Vocab Coverage -->
             <div class="vocab-coverage-section">
                 <h3>Vocab Coverage
-                    <span class="info-badge" data-tooltip="선택한 데이터셋을 Teacher의 토크나이저로 분석한 결과입니다. Vocab Size를 줄이면 희귀 토큰이 제거되지만, 자주 사용되는 토큰만 유지하면 대부분의 텍스트를 커버할 수 있습니다. 99% 이상의 커버리지를 권장합니다.">i</span>
+                    <span class="info-badge" data-tooltip="Analysis of selected datasets using the Teacher's tokenizer. Reducing Vocab Size removes rare tokens, but keeping frequent tokens covers most text. 99%+ coverage recommended.">i</span>
                 </h3>
                 <div class="vocab-coverage-controls">
                     <button id="btn-analyze" onclick="analyzeVocab()">Analyze Vocab Coverage</button>
@@ -165,7 +165,7 @@
         <!-- Size Estimation (live) -->
         <section class="panel" id="estimate-panel">
             <h2>5. Size Estimation
-                <span class="info-badge" data-tooltip="현재 설정 기준 모델 크기를 실시간 추정합니다. FP32는 파라미터당 4바이트 기준입니다. 압축 비율이 10x를 초과하면 Teacher→Student 직접 증류보다 중간 모델을 거치는 2-Stage Distillation이 권장됩니다.">i</span>
+                <span class="info-badge" data-tooltip="Real-time model size estimation based on current settings. FP32 = 4 bytes per parameter. If compression exceeds 10x, 2-Stage Distillation via an intermediate model is recommended.">i</span>
             </h2>
             <div class="estimate-grid">
                 <div class="estimate-card">
@@ -225,7 +225,7 @@
             <!-- Manual Create -->
             <div class="action-section">
                 <h3>Manual Create
-                    <span class="info-badge" data-tooltip="위에서 직접 선택한 레이어와 설정으로 Student 모델을 생성합니다. Layer pruning + Vocab pruning이 적용됩니다. 생성 후 distill 명령으로 Knowledge Distillation을 실행하세요.">i</span>
+                    <span class="info-badge" data-tooltip="Create a Student model using the layers and settings selected above. Layer pruning + Vocab pruning are applied. After creation, run Knowledge Distillation to improve quality.">i</span>
                 </h3>
                 <div class="action-row">
                     <div class="action-input">
@@ -243,20 +243,20 @@
             <!-- Auto Compress -->
             <div class="action-section">
                 <h3>Auto Compress
-                    <span class="info-badge" data-tooltip="크기 제약 내에서 자동으로 최적의 레이어 수, Hidden dim, Vocab 크기를 찾아 모델을 생성합니다. 우선순위: Hidden dim 보존 > 레이어 수 > Vocab 크기. 압축 비율 10x 초과 시 중간 모델도 함께 생성됩니다.">i</span>
+                    <span class="info-badge" data-tooltip="Automatically find optimal layer count, hidden dim, and vocab size within size constraints. Priority: hidden dim > layer count > vocab size. If compression >10x, an intermediate model is also created.">i</span>
                 </h3>
                 <div class="auto-compress-grid">
                     <div class="config-item">
                         <label for="auto-max-mb">
                             Max Size (MB)
-                            <span class="info-badge" data-tooltip="FP32 기준 최대 모델 파일 크기입니다. 파라미터당 4바이트로 계산됩니다. INT8 양자화 시 약 1/4로 줄어듭니다.">i</span>
+                            <span class="info-badge" data-tooltip="Max model file size in FP32 (4 bytes/param). Reduces to ~1/4 with INT8 quantization.">i</span>
                         </label>
                         <input type="number" id="auto-max-mb" value="50" step="5" min="5" max="2000">
                     </div>
                     <div class="config-item">
                         <label for="auto-max-params">
                             Max Parameters
-                            <span class="info-badge" data-tooltip="최대 파라미터 수입니다. 20M = 2천만개. MB 제약과 함께 적용되며, 둘 중 더 작은 제약이 우선합니다.">i</span>
+                            <span class="info-badge" data-tooltip="Max number of parameters. 20M = 20 million. Applied with MB constraint; the stricter one takes precedence.">i</span>
                         </label>
                         <input type="number" id="auto-max-params" value="20000000" step="1000000" min="100000">
                         <span class="config-hint" id="auto-params-hint">20M</span>
@@ -264,7 +264,7 @@
                     <div class="config-item">
                         <label for="auto-min-layers">
                             Min Layers
-                            <span class="info-badge" data-tooltip="최소 유지할 레이어 수입니다. 이 값 이상의 레이어가 보장됩니다. 너무 적으면 모델 품질이 급격히 떨어집니다.">i</span>
+                            <span class="info-badge" data-tooltip="Minimum layers to retain. At least this many layers are guaranteed. Too few layers cause severe quality loss.">i</span>
                         </label>
                         <input type="number" id="auto-min-layers" value="4" step="1" min="2" max="24">
                     </div>
@@ -277,6 +277,153 @@
             </div>
 
             <div id="action-status" class="status-box"></div>
+        </section>
+
+        <!-- Distillation -->
+        <section class="panel" id="distill-panel">
+            <h2>8. Knowledge Distillation
+                <span class="info-badge" data-tooltip="Train the Student to reproduce the Teacher's embeddings using MSE + Cosine Similarity loss. A Projection layer is added automatically if dimensions differ.">i</span>
+            </h2>
+
+            <!-- Source / Target -->
+            <div class="distill-config">
+                <div class="distill-row">
+                    <div class="config-item" style="flex:1">
+                        <label>Source (Teacher)
+                            <span class="info-badge" data-tooltip="The source model to teach embeddings from. Enter a HuggingFace model ID or local path. Registered Teacher keys (e.g., gte) also work.">i</span>
+                        </label>
+                        <select id="distill-teacher"></select>
+                    </div>
+                    <div class="config-item" style="flex:1">
+                        <label>Target (Student)
+                            <span class="info-badge" data-tooltip="The compressed model to train. Select a model created with Create or Auto Compress above.">i</span>
+                        </label>
+                        <select id="distill-student"></select>
+                    </div>
+                    <div class="config-item" style="flex:1">
+                        <label>Output Path
+                            <span class="info-badge" data-tooltip="Path to save the distilled model. Leave empty for auto (student_path + '_distilled').">i</span>
+                        </label>
+                        <input type="text" id="distill-output" placeholder="auto">
+                    </div>
+                </div>
+
+                <!-- Training params -->
+                <div class="distill-row" style="margin-top: 0.8rem">
+                    <div class="config-item">
+                        <label>Epochs <span class="info-badge" data-tooltip="Max training epochs. Early stopping may end training sooner.">i</span></label>
+                        <input type="number" id="distill-epochs" value="10" min="1" max="100">
+                    </div>
+                    <div class="config-item">
+                        <label>Batch Size <span class="info-badge" data-tooltip="Sentences per batch. Adjust for GPU memory. CPU: 16-32, GPU: 64-128 recommended.">i</span></label>
+                        <input type="number" id="distill-batch" value="32" min="1" max="512" step="8">
+                    </div>
+                    <div class="config-item">
+                        <label>Learning Rate <span class="info-badge" data-tooltip="AdamW optimizer learning rate. Default 2e-5 works well for most cases.">i</span></label>
+                        <input type="number" id="distill-lr" value="0.00002" step="0.00001" min="0.000001">
+                    </div>
+                    <div class="config-item">
+                        <label>Patience <span class="info-badge" data-tooltip="Stop early if loss doesn't improve for this many epochs.">i</span></label>
+                        <input type="number" id="distill-patience" value="3" min="1" max="20">
+                    </div>
+                    <div class="config-item">
+                        <label>MSE Weight</label>
+                        <input type="number" id="distill-mse" value="1.0" step="0.1" min="0">
+                    </div>
+                    <div class="config-item">
+                        <label>Cosine Weight</label>
+                        <input type="number" id="distill-cos" value="0.5" step="0.1" min="0">
+                    </div>
+                </div>
+
+                <!-- Device / Dataset -->
+                <div class="distill-row" style="margin-top: 0.8rem">
+                    <div class="config-item">
+                        <label>Device <span class="info-badge" data-tooltip="Training device. GPU is auto-detected if available.">i</span></label>
+                        <select id="distill-device"></select>
+                    </div>
+                    <div class="config-item">
+                        <label>Max Length <span class="info-badge" data-tooltip="Max token length for input text. Longer sentences are truncated.">i</span></label>
+                        <input type="number" id="distill-maxlen" value="64" min="16" max="512" step="16">
+                    </div>
+                    <div class="config-item">
+                        <label>
+                            <input type="checkbox" id="distill-save-every" checked> Save every epoch
+                            <span class="info-badge" data-tooltip="Save model after each epoch. If unchecked, only the best-loss model is saved.">i</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="action-row" style="margin-top: 1rem">
+                    <button class="btn-primary" id="btn-distill" onclick="startDistill()">Start Distillation</button>
+                    <button class="btn-secondary" id="btn-distill-stop" onclick="stopDistill()" disabled>Stop</button>
+                    <button onclick="refreshModels()">Refresh Models</button>
+                </div>
+            </div>
+
+            <!-- Progress -->
+            <div id="distill-progress" class="distill-progress" style="display:none">
+                <div class="distill-status-bar">
+                    <span id="dp-status">Ready</span>
+                    <span id="dp-eta"></span>
+                </div>
+
+                <!-- Epoch progress -->
+                <div class="progress-section">
+                    <div class="progress-label">
+                        <span>Epoch <span id="dp-epoch">-</span> / <span id="dp-total-epochs">-</span></span>
+                        <span id="dp-epoch-loss"></span>
+                    </div>
+                    <div class="size-bar-bg"><div class="size-bar-fill" id="dp-epoch-bar" style="width:0%"></div></div>
+                </div>
+
+                <!-- Batch progress -->
+                <div class="progress-section">
+                    <div class="progress-label">
+                        <span>Batch <span id="dp-batch">-</span> / <span id="dp-total-batches">-</span></span>
+                        <span id="dp-batch-loss"></span>
+                    </div>
+                    <div class="size-bar-bg"><div class="size-bar-fill" id="dp-batch-bar" style="width:0%"></div></div>
+                </div>
+
+                <!-- Metrics -->
+                <div class="distill-metrics">
+                    <div class="metric"><span class="metric-label">Best Loss</span><span class="metric-value" id="dp-best-loss">-</span></div>
+                    <div class="metric"><span class="metric-label">Current Loss</span><span class="metric-value" id="dp-current-loss">-</span></div>
+                    <div class="metric"><span class="metric-label">MSE</span><span class="metric-value" id="dp-mse">-</span></div>
+                    <div class="metric"><span class="metric-label">Cosine</span><span class="metric-value" id="dp-cosine">-</span></div>
+                    <div class="metric"><span class="metric-label">LR</span><span class="metric-value" id="dp-lr">-</span></div>
+                    <div class="metric"><span class="metric-label">Patience</span><span class="metric-value" id="dp-patience-count">-</span></div>
+                </div>
+
+                <!-- Loss history -->
+                <div class="distill-log" id="dp-log"></div>
+            </div>
+        </section>
+
+        <!-- HuggingFace Upload -->
+        <section class="panel" id="upload-panel">
+            <h2>9. Upload to HuggingFace
+                <span class="info-badge" data-tooltip="Upload models to HuggingFace Hub. Requires an API token from https://huggingface.co/settings/tokens.">i</span>
+            </h2>
+            <div class="distill-row">
+                <div class="config-item" style="flex:1">
+                    <label>Model Path</label>
+                    <select id="upload-model"></select>
+                </div>
+                <div class="config-item" style="flex:1">
+                    <label>Repository ID <span class="info-badge" data-tooltip="HuggingFace repository (e.g., gomyk/my-small-model). Auto-created if it doesn't exist.">i</span></label>
+                    <input type="text" id="upload-repo" placeholder="username/model-name">
+                </div>
+                <div class="config-item" style="flex:1">
+                    <label>HF Token <span class="info-badge" data-tooltip="HuggingFace API token (hf_xxx...). Write permission required.">i</span></label>
+                    <input type="password" id="upload-token" placeholder="hf_...">
+                </div>
+            </div>
+            <div class="action-row" style="margin-top: 0.8rem">
+                <button class="btn-primary" id="btn-upload" onclick="uploadModel()">Upload to HuggingFace</button>
+            </div>
+            <div id="upload-status" class="status-box"></div>
         </section>
     </main>
 
