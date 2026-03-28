@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmallModel - Interactive Model Editor</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <h1>SmallModel</h1>
+        <p class="subtitle">Interactive Embedding Model Compression</p>
+    </header>
+
+    <main>
+        <!-- Teacher Selection -->
+        <section class="panel" id="teacher-panel">
+            <h2>1. Select Teacher Model</h2>
+            <div class="teacher-select-row">
+                <select id="teacher-select"></select>
+                <div id="teacher-info" class="info-box"></div>
+            </div>
+        </section>
+
+        <!-- Layer Editor -->
+        <section class="panel" id="layer-panel">
+            <h2>2. Select Layers
+                <span class="info-badge" data-tooltip="Teacher 모델의 Transformer 레이어를 선택/해제합니다. 선택된 레이어만 Student 모델에 포함됩니다. 첫 번째 레이어(L0)는 기본적인 토큰 표현을, 마지막 레이어는 의미적 표현을 담당합니다. 균등 간격(Uniform)이 일반적으로 가장 좋은 성능을 보입니다.">i</span>
+            </h2>
+            <div class="layer-controls">
+                <div class="presets">
+                    <label>Presets:</label>
+                    <div id="preset-buttons"></div>
+                </div>
+                <div class="layer-actions">
+                    <button onclick="selectAll()">Select All</button>
+                    <button onclick="deselectAll()">Deselect All</button>
+                    <button onclick="toggleEven()">Even Only</button>
+                    <button onclick="toggleOdd()">Odd Only</button>
+                </div>
+            </div>
+            <div id="layer-grid" class="layer-grid"></div>
+            <div id="layer-summary" class="summary"></div>
+        </section>
+
+        <!-- Config Controls -->
+        <section class="panel" id="config-panel">
+            <h2>3. Model Configuration</h2>
+            <div class="config-grid">
+                <div class="config-item">
+                    <label for="hidden-dim">
+                        Hidden Dimension
+                        <span class="info-badge" data-tooltip="각 레이어의 입출력 벡터 차원이자 최종 임베딩 차원입니다. 모든 레이어에서 동일하게 사용됩니다. 작을수록 모델이 가벼워지지만 표현력도 줄어듭니다. 64 단위로 조절하세요.">i</span>
+                    </label>
+                    <input type="number" id="hidden-dim" step="64" min="64">
+                    <span class="config-hint" id="hidden-hint"></span>
+                </div>
+                <div class="config-item">
+                    <label for="intermediate-size">
+                        Intermediate Size
+                        <span class="info-badge" data-tooltip="FFN(Feed-Forward Network) 내부 확장 차원입니다. 각 레이어의 Attention 뒤에 오는 FFN에서 hidden_dim → intermediate → hidden_dim 으로 확장/축소됩니다. 보통 hidden_dim의 4배 (768→3072). 모델 파라미터의 상당 부분을 차지하므로, 줄이면 모델이 크게 가벼워집니다.">i</span>
+                    </label>
+                    <input type="number" id="intermediate-size" step="64" min="64">
+                    <span class="config-hint" id="inter-hint"></span>
+                </div>
+                <div class="config-item">
+                    <label for="vocab-size">
+                        Vocab Size
+                        <span class="info-badge" data-tooltip="토크나이저의 어휘 수입니다. Embedding 레이어 크기가 vocab_size × hidden_dim 으로 결정됩니다. 원본 모델은 250K+ 어휘를 가지지만, 코퍼스에 등장하지 않는 희귀 토큰을 제거하면 크기를 대폭 줄일 수 있습니다. 다국어 지원 시 최소 3,000 이상 권장합니다.">i</span>
+                    </label>
+                    <input type="number" id="vocab-size" step="1000" min="1000">
+                    <span class="config-hint" id="vocab-hint"></span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Dataset & Task Selection + Vocab Coverage -->
+        <section class="panel" id="data-panel">
+            <h2>4. Data & Vocab Coverage
+                <span class="info-badge" data-tooltip="Distillation에 사용할 데이터셋과 평가에 사용할 MTEB 태스크를 선택합니다. 선택한 데이터셋을 토크나이징하여 Vocab Size에 따른 토큰 커버리지를 실시간으로 확인할 수 있습니다.">i</span>
+            </h2>
+
+            <div class="data-grid">
+                <!-- Distillation Datasets -->
+                <div class="data-column">
+                    <h3>Distillation Datasets
+                        <span class="info-badge" data-tooltip="Student 모델 학습(Knowledge Distillation)에 사용될 텍스트 데이터셋입니다. Teacher의 임베딩을 Student가 재현하도록 학습할 때 이 텍스트들을 사용합니다. Vocab pruning 시에도 이 데이터셋의 토큰 빈도를 기준으로 합니다.">i</span>
+                    </h3>
+                    <div class="dataset-group-toggle">
+                        <button onclick="toggleDatasetGroup('all')">All</button>
+                        <button onclick="toggleDatasetGroup('none')">None</button>
+                        <button onclick="toggleDatasetGroup('Classification')">Classification</button>
+                        <button onclick="toggleDatasetGroup('STS')">STS</button>
+                    </div>
+                    <div id="dataset-list" class="checkbox-list"></div>
+                </div>
+
+                <!-- Evaluation Tasks -->
+                <div class="data-column">
+                    <h3>Evaluation Tasks (MTEB)
+                        <span class="info-badge" data-tooltip="Student 모델의 품질을 측정할 MTEB 벤치마크 태스크입니다. Classification(분류), Clustering(군집화), STS(문장 유사도) 세 그룹이 있습니다. 평가에만 사용되며 모델 생성에는 영향을 주지 않습니다.">i</span>
+                    </h3>
+                    <div class="dataset-group-toggle">
+                        <button onclick="toggleEvalGroup('all')">All</button>
+                        <button onclick="toggleEvalGroup('none')">None</button>
+                        <button onclick="toggleEvalGroup('Classification')">Classification</button>
+                        <button onclick="toggleEvalGroup('Clustering')">Clustering</button>
+                        <button onclick="toggleEvalGroup('STS')">STS</button>
+                    </div>
+                    <div id="eval-task-list" class="checkbox-list"></div>
+                </div>
+            </div>
+
+            <!-- Vocab Coverage -->
+            <div class="vocab-coverage-section">
+                <h3>Vocab Coverage
+                    <span class="info-badge" data-tooltip="선택한 데이터셋을 Teacher의 토크나이저로 분석한 결과입니다. Vocab Size를 줄이면 희귀 토큰이 제거되지만, 자주 사용되는 토큰만 유지하면 대부분의 텍스트를 커버할 수 있습니다. 99% 이상의 커버리지를 권장합니다.">i</span>
+                </h3>
+                <div class="vocab-coverage-controls">
+                    <button id="btn-analyze" onclick="analyzeVocab()">Analyze Vocab Coverage</button>
+                    <span id="analyze-status" class="config-hint"></span>
+                </div>
+                <div id="vocab-coverage-result" class="vocab-coverage-result" style="display:none;">
+                    <div class="coverage-stats">
+                        <div class="stat-item">
+                            <span class="stat-label">Total texts</span>
+                            <span class="stat-value" id="vc-total-texts">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Total tokens</span>
+                            <span class="stat-value" id="vc-total-tokens">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Unique tokens in corpus</span>
+                            <span class="stat-value" id="vc-unique-tokens">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Original vocab</span>
+                            <span class="stat-value" id="vc-original-vocab">-</span>
+                        </div>
+                    </div>
+                    <div class="coverage-target">
+                        <div class="coverage-target-row">
+                            <label>Current Vocab Size:</label>
+                            <span class="coverage-vocab-val" id="vc-target-vocab">-</span>
+                            <span class="coverage-arrow">&rarr;</span>
+                            <label>Token Coverage:</label>
+                            <span class="coverage-pct" id="vc-coverage-pct">-</span>
+                        </div>
+                        <div class="coverage-bar-container">
+                            <div class="coverage-bar-bg">
+                                <div class="coverage-bar-fill" id="vc-bar"></div>
+                            </div>
+                            <div class="coverage-bar-labels">
+                                <span>0%</span>
+                                <span>50%</span>
+                                <span>100%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Size Estimation (live) -->
+        <section class="panel" id="estimate-panel">
+            <h2>5. Size Estimation
+                <span class="info-badge" data-tooltip="현재 설정 기준 모델 크기를 실시간 추정합니다. FP32는 파라미터당 4바이트 기준입니다. 압축 비율이 10x를 초과하면 Teacher→Student 직접 증류보다 중간 모델을 거치는 2-Stage Distillation이 권장됩니다.">i</span>
+            </h2>
+            <div class="estimate-grid">
+                <div class="estimate-card">
+                    <div class="estimate-label">Teacher</div>
+                    <div class="estimate-value" id="teacher-params">-</div>
+                    <div class="estimate-unit">params</div>
+                    <div class="estimate-value" id="teacher-mb">-</div>
+                    <div class="estimate-unit">MB (FP32)</div>
+                </div>
+                <div class="estimate-arrow">&#x2192;</div>
+                <div class="estimate-card highlight">
+                    <div class="estimate-label">Student</div>
+                    <div class="estimate-value" id="student-params">-</div>
+                    <div class="estimate-unit">params</div>
+                    <div class="estimate-value" id="student-mb">-</div>
+                    <div class="estimate-unit">MB (FP32)</div>
+                </div>
+                <div class="estimate-card">
+                    <div class="estimate-label">Compression</div>
+                    <div class="estimate-value" id="compression-ratio">-</div>
+                    <div class="estimate-unit">x smaller</div>
+                    <div class="estimate-value" id="two-stage-hint"></div>
+                </div>
+            </div>
+            <!-- Size bar -->
+            <div class="size-bar-container">
+                <div class="size-bar-bg">
+                    <div class="size-bar-fill" id="size-bar"></div>
+                </div>
+                <div class="size-bar-labels">
+                    <span>0 MB</span>
+                    <span id="size-bar-max">-</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Architecture Visualization -->
+        <section class="panel" id="arch-panel">
+            <h2>6. Architecture Preview</h2>
+            <div class="arch-container">
+                <div class="arch-column">
+                    <h3>Teacher</h3>
+                    <div id="arch-teacher" class="arch-layers"></div>
+                </div>
+                <div class="arch-arrows" id="arch-arrows"></div>
+                <div class="arch-column">
+                    <h3>Student</h3>
+                    <div id="arch-student" class="arch-layers"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Actions -->
+        <section class="panel" id="action-panel">
+            <h2>7. Create Model</h2>
+
+            <!-- Manual Create -->
+            <div class="action-section">
+                <h3>Manual Create
+                    <span class="info-badge" data-tooltip="위에서 직접 선택한 레이어와 설정으로 Student 모델을 생성합니다. Layer pruning + Vocab pruning이 적용됩니다. 생성 후 distill 명령으로 Knowledge Distillation을 실행하세요.">i</span>
+                </h3>
+                <div class="action-row">
+                    <div class="action-input">
+                        <label for="model-name">Model Name:</label>
+                        <input type="text" id="model-name" placeholder="e.g., my_custom_model">
+                    </div>
+                    <button class="btn-primary" id="btn-create" onclick="createModel()">
+                        Create Student Model
+                    </button>
+                </div>
+            </div>
+
+            <div class="action-divider"></div>
+
+            <!-- Auto Compress -->
+            <div class="action-section">
+                <h3>Auto Compress
+                    <span class="info-badge" data-tooltip="크기 제약 내에서 자동으로 최적의 레이어 수, Hidden dim, Vocab 크기를 찾아 모델을 생성합니다. 우선순위: Hidden dim 보존 > 레이어 수 > Vocab 크기. 압축 비율 10x 초과 시 중간 모델도 함께 생성됩니다.">i</span>
+                </h3>
+                <div class="auto-compress-grid">
+                    <div class="config-item">
+                        <label for="auto-max-mb">
+                            Max Size (MB)
+                            <span class="info-badge" data-tooltip="FP32 기준 최대 모델 파일 크기입니다. 파라미터당 4바이트로 계산됩니다. INT8 양자화 시 약 1/4로 줄어듭니다.">i</span>
+                        </label>
+                        <input type="number" id="auto-max-mb" value="50" step="5" min="5" max="2000">
+                    </div>
+                    <div class="config-item">
+                        <label for="auto-max-params">
+                            Max Parameters
+                            <span class="info-badge" data-tooltip="최대 파라미터 수입니다. 20M = 2천만개. MB 제약과 함께 적용되며, 둘 중 더 작은 제약이 우선합니다.">i</span>
+                        </label>
+                        <input type="number" id="auto-max-params" value="20000000" step="1000000" min="100000">
+                        <span class="config-hint" id="auto-params-hint">20M</span>
+                    </div>
+                    <div class="config-item">
+                        <label for="auto-min-layers">
+                            Min Layers
+                            <span class="info-badge" data-tooltip="최소 유지할 레이어 수입니다. 이 값 이상의 레이어가 보장됩니다. 너무 적으면 모델 품질이 급격히 떨어집니다.">i</span>
+                        </label>
+                        <input type="number" id="auto-min-layers" value="4" step="1" min="2" max="24">
+                    </div>
+                </div>
+                <div class="action-row" style="margin-top: 0.8rem;">
+                    <button class="btn-secondary" id="btn-auto" onclick="autoCompress()">
+                        Auto Compress
+                    </button>
+                </div>
+            </div>
+
+            <div id="action-status" class="status-box"></div>
+        </section>
+    </main>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smallmodel"
+version = "0.1.0"
+description = "Compress large embedding models into small, fast students via layer pruning, vocab pruning, hidden dim reduction, and knowledge distillation."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "sentence-transformers>=3.0.0",
+    "numpy>=1.24.0",
+    "tqdm",
+    "sentencepiece",
+    "protobuf",
+]
+
+[project.optional-dependencies]
+eval = ["mteb>=1.14.0", "pandas>=2.0.0"]
+export = ["onnxruntime>=1.16.0", "onnx>=1.15.0", "optimum[onnxruntime]>=1.16.0"]
+hub = ["huggingface-hub>=0.20.0"]
+web = ["flask>=3.0.0"]
+all = ["smallmodel[eval,export,hub,web]"]
+
+[project.scripts]
+smallmodel = "smallmodel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
